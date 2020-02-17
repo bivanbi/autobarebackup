@@ -10,12 +10,13 @@ LOCK_DIR="/var/lock"
 SILENT=0
 PARALLEL_COMPRESS=4
 INCREMENTAL_DIR_MAX=1
+INCREMENTAL_DIR_CLEANUP_BEFORE_NEXT_FULL_BACKUP=false
 SCRIPT_UPDATE_URL="https://raw.githubusercontent.com/macskas/autobarebackup/master/bin/autobarebackup"
 
 FILE_CONFIG="/etc/autobarebackup/autobarebackup.conf"
 
 BINARY_NEED=( "find" "tar" "gzip" "mail" )
-CONFIG_ALLOWED=( "SILENT" "PARALLEL_COMPRESS" "INCREMENTAL_DIR_MAX" "INCREMENTAL_DATE" "EMAIL_ALERT" "DIR_BACKUP_BASE" "SCRIPT_UPDATE_URL" "LOCK_DIR" )
+CONFIG_ALLOWED=( "SILENT" "PARALLEL_COMPRESS" "INCREMENTAL_DIR_MAX" "INCREMENTAL_DATE" "EMAIL_ALERT" "DIR_BACKUP_BASE" "SCRIPT_UPDATE_URL" "LOCK_DIR" "INCREMENTAL_DIR_CLEANUP_BEFORE_NEXT_FULL_BACKUP")
 MYHOST=$(hostname)
 DATE_SUFFIX=$(date +%Y-%m-%d_%Hh%Mm_%a)
 INCREMENTAL_DATE=$(date --date="last sunday" +%Y-%m-%d)
@@ -200,6 +201,27 @@ do_update()
     exit 0
 }
 
+do_get_before_compressed_backup_cleanup_offset()
+{
+    local dir_latest="$1"
+    local link_latest="$2"
+
+    local link_current=`find "$dir_latest/" -type l | tail -1`
+
+    # disabled
+    if [ "true" != "$INCREMENTAL_DIR_CLEANUP_BEFORE_NEXT_FULL_BACKUP" ]; then
+        echo 0
+    # latest dir / link does not exist
+    elif [ "" = "$link_current" ]; then
+        echo 0
+    # latest link equals current, no new full backup is about to be created
+    elif [ "$link_latest" = "$link_current" ]; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+
 do_cleanup_maxfiles()
 {
     local dir_incr="$1"
@@ -218,8 +240,9 @@ do_cleanup_maxfiles()
     if [ $? -ne 0 ]; then
         do_error "Something wrong with do_cleanup_maxfiles first parameter($dir_incr)"
     fi
-    local numfiles=$(find "$dir_incr/" -type d -printf "%P\n"|grep -v '^$'|wc -l)
+    local numfiles=$(find "$dir_incr/" -type d -mindepth 1 -printf "%P\n"|wc -l)
     local real_maxfiles=$(( INCREMENTAL_DIR_MAX-offset ))
+
     if [ $numfiles -gt $real_maxfiles ]; then
         local need_files=$(( numfiles-real_maxfiles ))
         if [ $need_files -gt 0 ]; then
@@ -230,7 +253,7 @@ do_cleanup_maxfiles()
             	    do_error "Could not delete $fp."
                 fi
         	rm -rf "$fp"
-            done < <(find "$dir_incr/" -type d -printf "%T@ %h/%f\n"|sort -n|cut -d ' ' -f2-|head -n "$need_files")
+            done < <(find "$dir_incr/" -type d -mindepth 1 -printf "%T@ %h/%f\n"|sort -n|cut -d ' ' -f2-|head -n "$need_files")
         fi
     else
         do_info "do_cleanup_maxfiles" "No action required. Files found: $numfiles"
@@ -305,7 +328,10 @@ do_compressed_backup()
     local dir_latest="$namespace_fullpath/latest"
     local link_latest="$dir_latest/$INCREMENTAL_DATE"
 
-    do_cleanup_maxfiles "$namespace_fullpath/incr" 0
+    local before_backup_cleanup_offset=`do_get_before_compressed_backup_cleanup_offset "$dir_latest" "$link_latest"`
+    do_info "do_compressed_backup" "before_backup_cleanup_offset=$before_backup_cleanup_offset"
+    do_cleanup_maxfiles "$namespace_fullpath/incr" $before_backup_cleanup_offset
+
     if [ ! -d "$dir_base_inc" ]; then
         mkdir -p "$dir_base_inc" || do_error "Failed to create directory: $dir_base_inc"
     fi
@@ -356,7 +382,7 @@ do_backup()
         method_local="tar"
         namespace_fullpath="$DIR_BACKUP_BASE/$backup_namespace"
         include_file="$namespace_fullpath/backup.include"
-        do_info "include file: $include_file"
+        do_info "do_backup" "include file: $include_file"
         exclude_file="$namespace_fullpath/backup.exclude"
         method_file="$namespace_fullpath/backup.method"
         if [ ! -f "$include_file" ]; then
